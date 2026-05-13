@@ -1,0 +1,47 @@
+# 3 модуль - векторизация:
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+import os
+
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+class Vectorization:
+    def __init__(self, dim: int = 128):
+        self.dim = dim
+
+        model_path = "./models/models--deepvk--USER2-small/snapshots/23f65b34cf7632032061f5cc66c14714e6d4cee4"
+
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Модель не найдена: {model_path}")
+
+        self.model = SentenceTransformer(model_path, truncate_dim=self.dim)
+        print(f"Модель загружена из локальной папки. Размерность: {self.dim}")
+
+    # Возвращение вектора (эмбеддинга) как numpy array:
+    def encode(self, text: str) -> np.ndarray:
+        if not text or not isinstance(text, str):
+            text = ""
+        return self.model.encode(text, normalize_embeddings=True)
+
+    # Возвращение вектора (эмбеддинга) как список (для сохранения в БД):
+    def encode_to_list(self, text: str) -> list:
+        emb = self.encode(text)
+        return emb.tolist()
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    encoder = Vectorization(dim=128)
+
+    text1 = "установить windows"
+
+    emb = encoder.encode(text1)
+    emb_list = encoder.encode_to_list(text1)
+
+    print(f"Эмбеддинг для '{text1}':")
+    print(f"  Форма (numpy): {emb.shape}")
+    print(f"  Тип для БД: {type(emb_list)}")
+    print(f"  Длина списка: {len(emb_list)}")
+    print(f"  Первые 20 чисел: {emb_list[:20]}")
