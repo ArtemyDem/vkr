@@ -1,0 +1,294 @@
+# 4 модуль - обучение модели CatBoost:
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+import numpy as np
+from catboost import CatBoostRegressor, CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, accuracy_score, classification_report
+import joblib
+import os
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Регрессия - прогнозирование трудоёмкости. Классификация - рекомендация исполнителя
+
+class CatBoostModel:
+    def __init__(self):
+        self.regressor = None      # Модель для трудоёмкости
+        self.classifier = None     # Модель для исполнителя
+        self.feature_columns = None
+        self.is_trained = False
+
+    # Подготовка данных из словарей для обучения:
+    def prepare_features(self, data: list) -> tuple:
+        X_list = []
+        y_labor_list = []
+        y_executor_list = []
+
+        # Категориальные признаки:
+        priority_map = {'низкий': 0, 'обычный': 1, 'высокий': 2, 'критический': 3}
+
+        for item in data:
+            # Вектор (эмбеддинг)
+            vector = item['vector']
+            if isinstance(vector, str):
+                import ast
+                vector = ast.literal_eval(vector)
+
+            # Числовые признаки:
+            numeric_features = [
+                item['num_noun'],
+                item['num_verb'],
+                item['num_adj'],
+                item['num_ner'],
+                item['num_pos'],
+                item['noun_ratio'],
+                item['verb_ratio'],
+                item['adj_ratio']
+            ]
+
+            # Категориальный признак (priority):
+            priority = priority_map.get(item['priority'].lower(), 1)
+
+            # Объединение всего в один вектор:
+            features = list(vector) + numeric_features + [priority]
+            X_list.append(features)
+
+            # Целевые переменные:
+            y_labor_list.append(item['labor_intensity'])
+            y_executor_list.append(item['id_executor'])
+
+        X = np.array(X_list)
+        y_labor = np.array(y_labor_list)
+        y_executor = np.array(y_executor_list)
+
+        # Сохранение названия признаков:
+        self.feature_columns = [f'vect_{i}' for i in range(len(vector))] + \
+                               ['num_noun', 'num_verb', 'num_adj', 'num_ner', 'num_pos',
+                                'noun_ratio', 'verb_ratio', 'adj_ratio', 'priority']
+
+        print(f"Подготовлено {len(X)} образцов")
+        print(f"Размерность признаков: {X.shape[1]}")
+
+        return X, y_labor, y_executor
+
+    # Обучение модели CatBoost:
+    def train(self, data: list, test_size: float = 0.2, verbose: bool = True):
+        if verbose:
+            print("ОБУЧЕНИЕ МОДЕЛЕЙ CATBOOST")
+            print("-" * 50)
+
+        # Подготовка данных:
+        X, y_labor, y_executor = self.prepare_features(data)
+
+        if len(X) == 0:
+            print("❌ Нет данных для обучения!")
+            return False
+
+        # Разделение на обучающую и тестовую выборки:
+        X_train, X_test, y_labor_train, y_labor_test, y_executor_train, y_executor_test = train_test_split(X, y_labor, y_executor, test_size=test_size, random_state=42)
+
+        # Модель 1 - Регрессия (прогнозирование трудоёмкости):
+        if verbose:
+            print("\nОбучение модели прогнозирования трудоёмкости...")
+
+        self.regressor = CatBoostRegressor(
+            iterations=500,
+            learning_rate=0.1,
+            depth=6,
+            random_seed=42,
+            verbose=False,
+            early_stopping_rounds=50
+        )
+
+        self.regressor.fit(
+            X_train, y_labor_train,
+            eval_set=(X_test, y_labor_test),
+            verbose=False
+        )
+
+        # Оценка качества регрессии:
+        y_labor_pred = self.regressor.predict(X_test)
+        mae = mean_absolute_error(y_labor_test, y_labor_pred)
+        rmse = np.sqrt(mean_squared_error(y_labor_test, y_labor_pred))
+
+        if verbose:
+            print(f" Средняя абсолютная ошибка (MAE): {mae:.3f} чел.-ч")
+            print(f" Среднеквадратичная ошибка (RMSE): {rmse:.3f} чел.-ч")
+
+        # Модель 2 - Классификация (рекомендация исполнителя):
+        if verbose:
+            print("\nОбучение модели рекомендации исполнителя...")
+
+        self.classifier = CatBoostClassifier(
+            iterations=500,
+            learning_rate=0.1,
+            depth=6,
+            random_seed=42,
+            verbose=False,
+            early_stopping_rounds=50
+        )
+
+        self.classifier.fit(
+            X_train, y_executor_train,
+            eval_set=(X_test, y_executor_test),
+            verbose=False
+        )
+
+        # Оценка качества классификации:
+        y_executor_pred = self.classifier.predict(X_test)
+        accuracy = accuracy_score(y_executor_test, y_executor_pred)
+
+        if verbose:
+            print(f"   Точность рекомендации: {accuracy:.3f} ({accuracy*100:.1f}%)")
+
+        self.is_trained = True
+        return True
+
+    # Прогнозирование трудоёмкости:
+    def predict_labor(self, features: np.ndarray) -> float:
+        if self.regressor is None:
+            raise ValueError("Модель не обучена. Сначала вызовите train()")
+
+        features = np.array(features).reshape(1, -1)
+        return float(self.regressor.predict(features)[0])
+
+    # Прогнозирование исполнителя:
+    def predict_executor(self, features: np.ndarray) -> int:
+        if self.classifier is None:
+            raise ValueError("Модель не обучена. Сначала вызовите train()")
+
+        features = np.array(features).reshape(1, -1)
+        return int(self.classifier.predict(features)[0])
+
+    # Возвращение ТОП-K исполнителей с вероятностями:
+    def predict_executor_proba(self, features: np.ndarray, top_k: int = 3) -> list:
+        if self.classifier is None:
+            raise ValueError("Модель не обучена. Сначала вызовите train()")
+
+        features = np.array(features).reshape(1, -1)
+        probabilities = self.classifier.predict_proba(features)[0]
+
+        # Получение классов (ID исполнителей):
+        classes = self.classifier.classes_
+
+        # Сортировка по убыванию вероятности:
+        top_indices = np.argsort(probabilities)[::-1][:top_k]
+
+        result = []
+        for idx in top_indices:
+            result.append({
+                'id_executor': int(classes[idx]),
+                'probability': float(probabilities[idx])
+            })
+
+        return result
+
+    # Формирование вектора признаков для прогнозирования:
+    def extract_features_for_prediction(self, clean_text: str, stats: dict, priority: str, vectorizer) -> np.ndarray:
+        # Получение вектора (эмбеддинга):
+        embedding = vectorizer.encode(clean_text)
+
+        # Числовые признаки из статистики:
+        numeric_features = [
+            stats.get('Количество существительных', 0),
+            stats.get('Количество глаголов', 0),
+            stats.get('Количество прилагательных', 0),
+            stats.get('Количество NER', 0),
+            stats.get('Количество POS', 0),
+            stats.get('Сотношение существительных к количеству частей речи', 0),
+            stats.get('Сотношение глаголов к количеству частей речи', 0),
+            stats.get('Сотношение прилагательных к количеству частей речи', 0)
+        ]
+
+        # Категориальный признак (priority):
+        priority_map = {'низкий': 0, 'обычный': 1, 'высокий': 2, 'критический': 3}
+        priority_value = priority_map.get(priority.lower(), 1)
+
+        # Объединение:
+        features = np.concatenate([embedding, numeric_features, [priority_value]])
+
+        return features
+
+    # Сохранение обученных моделей в файлы:
+    def save_models(self, regressor_path: str = 'models/labor_model.cbm', classifier_path: str = 'models/executor_model.cbm'):
+        if not self.is_trained:
+            print("Модели не обучены. Сначала вызовите train()")
+            return False
+
+        # Создание папки, если не существует:
+        os.makedirs('models', exist_ok=True)
+
+        if self.regressor:
+            self.regressor.save_model(regressor_path)
+            print(f"Модель трудоёмкости сохранена в {regressor_path}")
+
+        if self.classifier:
+            self.classifier.save_model(classifier_path)
+            print(f"Модель исполнителя сохранена в {classifier_path}")
+
+        return True
+
+    #Загрузка обученных моделей из файлов:
+    def load_models(self, regressor_path: str = 'models/labor_model.cbm', classifier_path: str = 'models/executor_model.cbm'):
+        if os.path.exists(regressor_path):
+            self.regressor = CatBoostRegressor()
+            self.regressor.load_model(regressor_path)
+            print(f"Модель трудоёмкости загружена из {regressor_path}")
+        else:
+            print(f"Файл {regressor_path} не найден")
+
+        if os.path.exists(classifier_path):
+            self.classifier = CatBoostClassifier()
+            self.classifier.load_model(classifier_path)
+            print(f"Модель исполнителя загружена из {classifier_path}")
+        else:
+            print(f"Файл {classifier_path} не найден")
+
+        if self.regressor and self.classifier:
+            self.is_trained = True
+            return True
+        return False
+
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    mock_data = []
+    for i in range(100):
+        mock_data.append({
+            'vector': [0.1] * 128,  # здесь заглушка!!!
+            'num_noun': np.random.randint(1, 10),
+            'num_verb': np.random.randint(1, 8),
+            'num_adj': np.random.randint(0, 5),
+            'num_ner': np.random.randint(0, 3),
+            'num_pos': np.random.randint(5, 20),
+            'noun_ratio': np.random.random(),
+            'verb_ratio': np.random.random(),
+            'adj_ratio': np.random.random(),
+            'labor_intensity': np.random.uniform(0.5, 8.0),
+            'priority': np.random.choice(['низкий', 'обычный', 'высокий', 'критический']),
+            'id_executor': np.random.choice([1, 2, 3, 4, 5])
+        })
+
+    # Создание и обучение:
+    model = CatBoostModel()
+    success = model.train(mock_data, test_size=0.2)
+
+    if success:
+        # Сохранение модели:
+        model.save_models()
+
+        # Тестовый прогноз:
+        test_features = np.random.random(128 + 8 + 1)
+
+        labor = model.predict_labor(test_features)
+        executor = model.predict_executor(test_features)
+        top_executors = model.predict_executor_proba(test_features, top_k=3)
+
+        print("ТЕСТОВЫЙ ПРОГНОЗ")
+        print(f"Прогноз трудоёмкости: {labor:.2f} чел.-ч")
+        print(f"Рекомендуемый исполнитель: {executor}")
+        print("ТОП-3 исполнителя:")
+        for ex in top_executors:
+            print(f"   ID {ex['id_executor']}: {ex['probability']:.3f}")
