@@ -1,0 +1,97 @@
+# 5 модуль - основная программа:
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+from database_manager import DatabaseManager
+from nlp_processor import NLPProcessor
+from vectorization import Vectorization
+from catboost_model import CatBoostModel
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def main():
+    print("СИСТЕМА ПРОГНОЗИРОВАНИЯ ТРУДОЁМКОСТИ IT-ЗАЯВОК")
+
+    # Инициализация компонентов:
+    print("\nИнициализация компонентов...")
+    db = DatabaseManager()
+    nlp = NLPProcessor()
+    vectorizer = Vectorization(dim=128)
+    model = CatBoostModel()
+
+    # Загрузка данных для обучения:
+    print("\nЗагрузка данных для обучения...")
+    training_data = db.get_training_data()
+
+    if len(training_data) == 0:
+        print("❌ Нет данных для обучения.")
+        print("   Сначала обработайте закрытые заявки через Natasha.")
+        print("   Или проверьте, что в таблице tickets есть записи со status='закрыта'")
+        db.close()
+        return
+
+    print(f"✅ Загружено {len(training_data)} записей")
+
+    # Обучение модели:
+    success = model.train(training_data)
+
+    if not success:
+        print("❌ Ошибка при обучении модели")
+        db.close()
+        return
+
+    # Сохранение моделей:
+    print("\nСохранение моделей...")
+    model.save_models()
+
+    # Прогнозирование для новых заявок:
+
+    print("ПРОГНОЗИРОВАНИЕ ДЛЯ НОВЫХ ЗАЯВОК")
+
+    new_tickets = db.get_new_tickets_for_prediction()
+
+    if len(new_tickets) == 0:
+        print("❌ Нет новых заявок для прогнозирования.")
+    else:
+        print(f"✅ Найдено {len(new_tickets)} новых заявок\n")
+
+        for ticket in new_tickets:
+            try:
+                # Обработка текста:
+                clean_text = nlp.crystalize(ticket['description'])
+                stats = nlp.statistics(ticket['description'])
+
+                # Проверка на ошибку в статистике
+                if "error" in stats:
+                    print(f"⚠️ Ошибка обработки заявки {ticket['id_tickets']}: {stats['error']}")
+                    continue
+
+                # Формирование признаков:
+                features = model.extract_features_for_prediction(
+                    clean_text, stats, ticket['priority'], vectorizer
+                )
+
+                # Прогноз:
+                predicted_labor = model.predict_labor(features)
+                predicted_executor = model.predict_executor(features)
+
+                # Сохранение в БД:
+                db.save_prediction(ticket['id_tickets'], predicted_labor, predicted_executor)
+
+                print(f"📋 Заявка {ticket['id_tickets']}:")
+                print(f"   Приоритет: {ticket['priority']}")
+                print(f"   Описание: {ticket['description'][:80]}...")
+                print(f"   Прогноз трудоёмкости: {predicted_labor:.2f} чел.-ч")
+                print(f"   Рекомендуемый исполнитель: ID {predicted_executor}")
+                print()
+
+            except Exception as e:
+                print(f"❌ Ошибка при обработке заявки {ticket['id_tickets']}: {e}")
+
+    # Закрытие соединения:
+    db.close()
+    print("\n✅ Работа завершена")
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    main()
