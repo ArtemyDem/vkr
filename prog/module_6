@@ -1,0 +1,36 @@
+# process_tickets.py
+
+from database_manager import DatabaseManager
+from nlp_processor import NLPProcessor
+from vectorization import Vectorization
+
+def process_closed_tickets():
+    print("ОБРАБОТКА ЗАКРЫТЫХ ЗАЯВОК")
+    print("=" * 50)
+
+    db = DatabaseManager()
+    nlp = NLPProcessor()
+    vec = Vectorization(dim=128)
+
+    tickets = db.get_closed_tickets_for_nlp()
+
+    if not tickets:
+        print("Нет закрытых заявок для обработки")
+        return
+
+    for ticket in tickets:
+        print(f"Обработка заявки {ticket['id_tickets']}...")
+
+        result_nlp = nlp.extract_base_nlp(ticket['description'])
+        stats = nlp.statistics(ticket['description'])
+        clean_text = nlp.crystalize(ticket['description'])
+        embedding = vec.encode_to_list(clean_text)
+
+        db.save_nlp_results(ticket['id_tickets'], result_nlp, stats, embedding)
+        db.save_nlp_details(ticket['id_tickets'], result_nlp)
+
+    print("Готово!")
+    db.close()
+
+if __name__ == "__main__":
+    process_closed_tickets()
