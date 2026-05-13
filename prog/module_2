@@ -1,0 +1,226 @@
+# 2 модуль - NLP, Natasha:
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+import os
+
+from natasha import (
+    Segmenter,
+    MorphVocab,
+    NewsEmbedding,
+    NewsMorphTagger,
+    NewsNERTagger,
+    Doc
+)
+
+from transformers import pipeline
+
+from yargy import Parser, rule
+from yargy.predicates import gram, type
+from yargy.interpretation import fact
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+class NLPProcessor:
+    def __init__(self):
+        self.segmenter = Segmenter()
+        self.morph_vocab = MorphVocab()
+        self.emb = NewsEmbedding()
+        self.morph_tagger = NewsMorphTagger(self.emb)
+        self.ner_tagger = NewsNERTagger(self.emb)
+
+        ner_model_path = "./models/models--Babelscape--wikineural-multilingual-ner/snapshots/bed6ee7a45d2827b6c90a4fd7983f0241ae0a5c1"
+
+        if not os.path.exists(ner_model_path):
+            print(f"Предупреждение: NER модель не найдена по пути {ner_model_path}")
+            self.tech_entities_model = None
+        else:
+            self.tech_entities_model = pipeline(
+                "ner",
+                model=ner_model_path,
+                aggregation_strategy="simple",
+                device=-1
+            )
+
+        self._init_yargy()
+
+    # Токенизации, лемматизация, POS-разметка, NER:
+    def extract_base_nlp(self, text, crystalize=False):
+        try:
+            doc = Doc(text)
+
+            # Токенизация:
+            doc.segment(self.segmenter)
+
+            # POS-разметка:
+            doc.tag_morph(self.morph_tagger)
+
+            # Лемматизация:
+            for token in doc.tokens:
+                token.lemmatize(self.morph_vocab)
+
+            # NER:
+            if not crystalize:
+                doc.tag_ner(self.ner_tagger)
+
+            if crystalize:
+                lemmas = []
+                for token in doc.tokens:
+                    if token.pos in {'NOUN', 'VERB', 'ADJ'}:
+                        lemma = token.lemma.lower()
+                        if len(lemma) >= 2 or lemma.isdigit():
+                            lemmas.append(lemma)
+                return " ".join(sorted(set(lemmas)))
+
+            return {
+                "Токены": [t.text for t in doc.tokens],
+                "Леммы": [t.lemma for t in doc.tokens],
+
+                "Существительные": [t.lemma for t in doc.tokens if t.pos == 'NOUN'],
+                "Глаголы": [t.lemma for t in doc.tokens if t.pos == 'VERB'],
+                "Прилагательные": [t.lemma for t in doc.tokens if t.pos == 'ADJ'],
+
+                "PER": [s.text for s in doc.spans if s.type == 'PER'],
+                "LOC": [s.text for s in doc.spans if s.type == 'LOC'],
+                "ORG": [s.text for s in doc.spans if s.type == 'ORG']
+            }
+        except Exception as e:
+            if crystalize:
+                return text
+            return {"error": f"Ошибка: {str(e)}"}
+
+    # Извлечение технологий:
+    def extract_tech_entities(self, text):
+        if not text or not isinstance(text, str):
+            return []
+
+        try:
+            results = self.tech_entities_model(text)
+            technologies = []
+
+            for entity in results:
+                entity_type = entity.get('entity_group', '')
+
+                if entity_type not in ['PER', 'LOC', 'ORG']:
+                    tech_name = entity['word'].strip()
+
+                    if len(tech_name) > 1:
+                        technologies.append({
+                            'technology': tech_name,
+                            'type': entity_type,
+                            'confidence': round(float(entity['score']), 3)
+                        })
+
+            unique_techs = {}
+            for tech in technologies:
+                name = tech['technology'].lower()
+                if name not in unique_techs or tech['confidence'] > unique_techs[name]['confidence']:
+                    unique_techs[name] = tech
+
+            return list(unique_techs.values())
+
+        except Exception as e:
+            print(f"Ошибка нейросети: {e}")
+            return []
+
+    # Статистика:
+    def statistics(self, text):
+        result_nlp = self.extract_base_nlp(text)
+        result_tech = self.extract_tech_entities(text)
+
+        if "error" in result_nlp:
+            return {"error": result_nlp["error"]}
+
+        num_ner = len(result_nlp["PER"]) + len(result_nlp["LOC"]) + len(result_nlp["ORG"])
+        num_pos = len(result_nlp["Существительные"]) + len(result_nlp["Глаголы"]) + len(result_nlp["Прилагательные"])
+
+        noun_ratio = len(result_nlp["Существительные"]) / num_pos if num_pos > 0 else 0
+        verb_ratio = len(result_nlp["Глаголы"]) / num_pos if num_pos > 0 else 0
+        abj_ratio = len(result_nlp["Прилагательные"]) / num_pos if num_pos > 0 else 0
+
+        return {
+            "Количество PER": len(result_nlp["PER"]),
+            "Количество LOC": len(result_nlp["LOC"]),
+            "Количество ORG": len(result_nlp["ORG"]),
+
+            "Количество технологий": len(result_tech),
+
+            "Количество существительных": len(result_nlp["Существительные"]),
+            "Количество глаголов": len(result_nlp["Глаголы"]),
+            "Количество прилагательных": len(result_nlp["Прилагательные"]),
+
+            "Количество NER": num_ner,
+            "Количество POS": num_pos,
+
+            "Сотношение существительных к количеству частей речи": noun_ratio,
+            "Сотношение глаголов к количеству частей речи": verb_ratio,
+            "Сотношение прилагательных к количеству частей речи": abj_ratio
+        }
+
+    # Инициализация парсера Yargy для извлечения пар "количество + объект":
+    def _init_yargy(self):
+        Item = fact('Item', ['amount', 'name'])
+
+        NUMBER = type('INT')
+        NOUN = gram('NOUN')
+
+        ITEM_RULE = rule(
+            NUMBER.interpretation(Item.amount),
+            NOUN.interpretation(Item.name)
+        ).interpretation(Item)
+
+        self.item_parser = Parser(ITEM_RULE)
+
+    # Извлечение пар "количество + объект":
+    def extract_items(self, text: str) -> list:
+        items = []
+        for match in self.item_parser.findall(text):
+            item = match.fact
+            items.append({
+                'amount': item.amount,
+                'name': item.name
+            })
+        return items
+
+    def crystalize(self, text: str) -> str:
+        return self.extract_base_nlp(text, crystalize=True)
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    processor = NLPProcessor()
+
+    texts = [
+        "К завтрашнему дню разработать надо ERD и доработать БД на PostgreSQL. Базовую информацию брать с ITIL. Разработать модель BPMN",
+        "Используем Docker для контейнеризации микросервисов на Java. Также нужен Kubernetes для оркестрации. База данных — MongoDB, а кэш — Redis. CI/CD через GitLab CI.",
+        "Для аналитики внедряем Apache Spark и Hadoop. ETL-процессы на Python с библиотекой Pandas. Визуализация через Tableau. Хранилище — Snowflake.",
+        "Фронтенд на React с TypeScript. Стейт-менеджмент — Redux Toolkit. Бэкенд на Node.js (Express). База — PostgreSQL + Prisma ORM. Тесты — Jest и Supertest.",
+        "Машинное обучение: TensorFlow 2.0 и PyTorch. Датасеты обрабатываем через DVC. Эксперименты логируем в MLflow. Деплой модели на AWS SageMaker.",
+        "Нам бы PostgreSQL. Вчера Иван Петров из Microsoft разработал БД на PostgreSQL",
+        "У нас не работает принтер. Нужна помощь"
+    ]
+
+    for i, text in enumerate(texts, 1):
+        print(f"\n{'='*60}")
+        print(f"ТЕКСТ {i}")
+        print(f"{'='*60}")
+
+        # Базовая NLP-обработка
+        base_data = processor.extract_base_nlp(text)
+        print(base_data)
+
+        tech_entities = processor.extract_tech_entities(text)
+        print(tech_entities)
+
+        stats = processor.statistics(text)
+        print(stats)
+
+        clean_text = processor.crystalize(text)
+        print(clean_text)
+
+    test_items_text = "Установить 5 мониторов, 3 принтера и 2 мышки. Также нужно 10 лицензий Windows"
+    print(f"\n{'='*60}")
+    print("ТЕСТ YARGY (извлечение предметов)")
+    print(f"{'='*60}")
+    print(f"Текст: {test_items_text}")
+    items = processor.extract_items(test_items_text)
+    for item in items:
+        print(f"  {item['amount']} x {item['name']}")
