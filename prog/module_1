@@ -1,0 +1,352 @@
+# 1 модуль - база данных:
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+import psycopg2
+from psycopg2 import Error
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+class DatabaseManager:
+    def __init__(self):
+        try:
+            self.connection = psycopg2.connect(
+                host="localhost",
+                database="ticket_system_1_12.05.2026",
+                port="5432",
+                user="postgres",
+                password=""
+            )
+            self.cursor = self.connection.cursor()
+            print("Подключение к базе данных установлено")
+        except psycopg2.Error as e:
+            print(f"Ошибка подключения к базе данных: {e}")
+            raise
+
+    # Возвращает закрытые заявки, которые не обработаны Natasha:
+    def get_closed_tickets_for_nlp(self):
+        try:
+            query = """
+                SELECT 
+                    t.id_tickets,
+                    t.description,
+                    t.labor_intensity,
+                    t.id_executor,
+                    t.priority
+                FROM tickets t
+                LEFT JOIN signs_tickets s ON t.id_tickets = s.id_ticket
+                WHERE t.status = 'закрыта'
+                  AND t.description IS NOT NULL
+                  AND t.description != ''
+                  AND t.labor_intensity IS NOT NULL
+                  AND s.id_ticket IS NULL  -- НЕ обработаны
+                ORDER BY t.id_tickets
+            """
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+
+            tickets = []
+            for row in rows:
+                tickets.append({
+                    'id_tickets': row[0],
+                    'description': row[1],
+                    'labor_intensity': float(row[2]) if row[2] else None,
+                    'id_executor': row[3],
+                    'priority': row[4]
+                })
+
+            print(f"Найдено {len(tickets)} закрытых заявок для обработки Natasha")
+            return tickets
+
+        except psycopg2.Error as e:
+            print(f"Ошибка: {e}")
+            return []
+
+    # Сохранение результатов обработки Natasha в таблицу signs_tickets:
+    def save_nlp_results(self, ticket_id: int, result_nlp: dict, stats: dict, embedding: list):
+        try:
+            # Проверка, есть ли уже запись:
+            self.cursor.execute(
+                "SELECT id_signs_tickets FROM signs_tickets WHERE id_ticket = %s",
+                (ticket_id,)
+            )
+            exists = self.cursor.fetchone()
+
+            if exists:
+                # Обновление:
+                query = """
+                    UPDATE signs_tickets SET
+                        num_noun = %s, num_verb = %s, num_adj = %s,
+                        num_per = %s, num_loc = %s, num_org = %s,
+                        num_technology = %s, num_ner = %s, num_pos = %s,
+                        noun_ratio = %s, verb_ratio = %s, adj_ratio = %s,
+                        vector = %s
+                    WHERE id_ticket = %s
+                """
+                self.cursor.execute(query, (
+                    stats.get('Количество существительных', 0),
+                    stats.get('Количество глаголов', 0),
+                    stats.get('Количество прилагательных', 0),
+                    stats.get('Количество PER', 0),
+                    stats.get('Количество LOC', 0),
+                    stats.get('Количество ORG', 0),
+                    stats.get('Количество технологий', 0),
+                    stats.get('Количество NER', 0),
+                    stats.get('Количество POS', 0),
+                    stats.get('Сотношение существительных к количеству частей речи', 0),
+                    stats.get('Сотношение глаголов к количеству частей речи', 0),
+                    stats.get('Сотношение прилагательных к количеству частей речи', 0),
+                    embedding,
+                    ticket_id
+                ))
+            else:
+                # Вставка новой:
+                query = """
+                    INSERT INTO signs_tickets (
+                        id_ticket, num_noun, num_verb, num_adj,
+                        num_per, num_loc, num_org, num_technology,
+                        num_ner, num_pos, noun_ratio, verb_ratio,
+                        adj_ratio, vector
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                self.cursor.execute(query, (
+                    ticket_id,
+                    stats.get('Количество существительных', 0),
+                    stats.get('Количество глаголов', 0),
+                    stats.get('Количество прилагательных', 0),
+                    stats.get('Количество PER', 0),
+                    stats.get('Количество LOC', 0),
+                    stats.get('Количество ORG', 0),
+                    stats.get('Количество технологий', 0),
+                    stats.get('Количество NER', 0),
+                    stats.get('Количество POS', 0),
+                    stats.get('Сотношение существительных к количеству частей речи', 0),
+                    stats.get('Сотношение глаголов к количеству частей речи', 0),
+                    stats.get('Сотношение прилагательных к количеству частей речи', 0),
+                    embedding
+                ))
+
+            self.connection.commit()
+            print(f"Сохранены признаки для заявки {ticket_id}")
+            return True
+
+        except psycopg2.Error as e:
+            print(f"Ошибка сохранения для заявки {ticket_id}: {e}")
+            self.connection.rollback()
+            return False
+
+    # Сохранение сущ, гл, прил, NER:
+    def save_nlp_details(self, ticket_id: int, result_nlp: dict):
+        """Сохраняет существительные, глаголы, прилагательные, NER в отдельные таблицы"""
+        try:
+            # Очищение старой записи:
+            tables = ['tickets_noun', 'tickets_verb', 'tickets_adj',
+                      'tickets_per', 'tickets_loc', 'tickets_org',
+                      'tickets_technologies']
+            for table in tables:
+                self.cursor.execute(f"DELETE FROM {table} WHERE id_tickets = %s", (ticket_id,))
+
+            # Сохранение сущ:
+            for word in result_nlp.get('Существительные', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_noun (id_tickets, noun) VALUES (%s, %s)",
+                    (ticket_id, word)
+                )
+
+            # Сохранение гл:
+            for word in result_nlp.get('Глаголы', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_verb (id_tickets, verb) VALUES (%s, %s)",
+                    (ticket_id, word)
+                )
+
+            # Сохранение прил:
+            for word in result_nlp.get('Прилагательные', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_adj (id_tickets, adj) VALUES (%s, %s)",
+                    (ticket_id, word)
+                )
+
+            # Сохранение PER, LOC, ORG:
+            for per in result_nlp.get('PER', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_per (id_tickets, per) VALUES (%s, %s)",
+                    (ticket_id, per)
+                )
+
+            for loc in result_nlp.get('LOC', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_loc (id_tickets, loc) VALUES (%s, %s)",
+                    (ticket_id, loc)
+                )
+
+            for org in result_nlp.get('ORG', []):
+                self.cursor.execute(
+                    "INSERT INTO tickets_org (id_tickets, org) VALUES (%s, %s)",
+                    (ticket_id, org)
+                )
+
+            self.connection.commit()
+            print(f"Сохранены детали для заявки {ticket_id}")
+            return True
+
+        except psycopg2.Error as e:
+            print(f"Ошибка сохранения деталей: {e}")
+            self.connection.rollback()
+            return False
+
+    # Возвращение данных для обучения CatBoost:
+    def get_training_data(self):
+        try:
+            query = """
+                SELECT 
+                    s.vector,
+                    s.num_noun,
+                    s.num_verb,
+                    s.num_adj,
+                    s.num_ner,
+                    s.num_pos,
+                    s.noun_ratio,
+                    s.verb_ratio,
+                    s.adj_ratio,
+                    t.labor_intensity,
+                    t.priority,
+                    t.id_executor
+                FROM signs_tickets s
+                JOIN tickets t ON s.id_ticket = t.id_tickets
+                WHERE t.status = 'закрыта'
+                  AND t.labor_intensity IS NOT NULL
+                  AND t.id_executor IS NOT NULL
+            """
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+
+            data = []
+            for row in rows:
+                data.append({
+                    'vector': row[0],
+                    'num_noun': row[1],
+                    'num_verb': row[2],
+                    'num_adj': row[3],
+                    'num_ner': row[4],
+                    'num_pos': row[5],
+                    'noun_ratio': row[6],
+                    'verb_ratio': row[7],
+                    'adj_ratio': row[8],
+                    'labor_intensity': float(row[9]) if row[9] else None,
+                    'priority': row[10],
+                    'id_executor': row[11]
+                })
+
+            print(f"Загружено {len(data)} записей для обучения")
+            return data
+
+        except psycopg2.Error as e:
+            print(f"Ошибка при получении данных для обучения: {e}")
+            return []
+
+    # Возвращение новых заявок для прогнозирования:
+    def get_new_tickets_for_prediction(self):
+        try:
+            query = """
+                SELECT 
+                    t.id_tickets,
+                    t.description,
+                    t.priority,
+                    t.date_create
+                FROM tickets t
+                WHERE t.status = 'новая'
+                  AND t.description IS NOT NULL
+                  AND t.description != ''
+                  AND TRIM(t.description) != ''
+                ORDER BY t.date_create DESC
+            """
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+
+            tickets = []
+            for row in rows:
+                tickets.append({
+                    'id_tickets': row[0],
+                    'description': row[1],
+                    'priority': row[2],
+                    'date_create': row[3]
+                })
+
+            print(f"Найдено {len(tickets)} новых заявок для прогноза")
+            return tickets
+
+        except psycopg2.Error as e:
+            print(f"Ошибка: {e}")
+            return []
+
+    # Сохранение прогоза в поля labor_intensity и id_executor для НОВЫХ заявок:
+    def save_prediction(self, ticket_id: int, predicted_labor: float, predicted_executor: int):
+        try:
+            query = """
+                UPDATE tickets 
+                SET labor_intensity = %s, id_executor = %s
+                WHERE id_tickets = %s 
+                AND status = 'новая'
+            """
+            self.cursor.execute(query, (predicted_labor, predicted_executor, ticket_id))
+            self.connection.commit()
+
+            if self.cursor.rowcount > 0:
+                print(f"Прогноз сохранён для заявки {ticket_id}")
+                return True
+            else:
+                print(f"Заявка {ticket_id} не найдена или не в статусе 'новая'")
+                return False
+        except psycopg2.Error as e:
+            print(f"Ошибка: {e}")
+            return False
+
+    # Возвращает список всех исполнителей:
+    def get_all_executors(self):
+        try:
+            query = """
+                SELECT 
+                    e.id_employees,
+                    e.name,
+                    e.surname,
+                    e.post,
+                    e.department,
+                    ep.tech_skills,
+                    ep.num_closed_tickets,
+                    ep.avg_labor_intensity
+                FROM employees e
+                LEFT JOIN employee_profile ep ON e.id_employees = ep.id_executor
+                ORDER BY e.id_employees
+            """
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+
+            executors = []
+            for row in rows:
+                executors.append({
+                    'id_executor': row[0],
+                    'name': row[1],
+                    'surname': row[2],
+                    'post': row[3],
+                    'department': row[4],
+                    'tech_skills': row[5] if row[5] else [],
+                    'num_closed_tickets': row[6] if row[6] else 0,
+                    'avg_labor_intensity': float(row[7]) if row[7] else 0
+                })
+            return executors
+        except psycopg2.Error as e:
+            print(f"❌ Ошибка: {e}")
+            return []
+
+    def close(self):
+        if self.cursor:
+            self.cursor.close()
+        if self.connection:
+            self.connection.close()
+        print("🔒 Соединение с базой данных закрыто")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
